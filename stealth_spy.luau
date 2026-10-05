@@ -25,6 +25,11 @@
       "FireServer function hooks detected" string-probes keep passing)
     * self-test right after install; auto-revert on any anomaly
     * stop() restores the original metatable (verified)
+    * v2 FIX (10/5): the outer u9 table is table.freeze()d by the AC, so
+      replacing u9.namecallInstance THROWS - a pcall swallowed it and
+      v1's blinder was a silent NO-OP (=> kick on first scan). We now
+      CLEAR THE INNER table (mutable), VERIFY by readback, ABORT BEFORE
+      hooking if blanking fails, and auto-revert if writes start failing.
 
   Run:   loadstring(readfile("havoc_db/stealth_spy.luau"))()
   Stop:  getgenv().HAVOC_SPY.stop()
@@ -104,18 +109,60 @@ SPY.u9 = refs.u9
 SPY.tbl1 = refs.tbl1
 log("AC baseline containers located (data-only access).")
 
+-- v2 FROZEN-TABLE FIX: the outer u9 table is table.freeze()d by the AC,
+-- so `u9.namecallInstance = {}` throws (a pcall silently swallowed it and
+-- v1's blinder was a NO-OP => first scan after hook = kick). Clear the
+-- INNER table instead - it is mutable - and verify every write by readback.
+local function blankBaselines()
+  local inner = SPY.u9.namecallInstance
+  local okU9 = false
+  if type(inner) == "table" then
+    local okClr = pcall(table.clear, inner)
+    if not okClr then
+      okClr = pcall(function()
+        for k in pairs(inner) do inner[k] = nil end
+      end)
+    end
+    okU9 = okClr and (next(inner) == nil)
+  end
+  pcall(rawset, SPY.tbl1, "namecallInstance", nil)
+  local okTbl = (rawget(SPY.tbl1, "namecallInstance") == nil)
+  return okU9, okTbl
+end
+
+local okBlankA, okBlankB = blankBaselines()
+if not (okBlankA and okBlankB) then
+  SPY.alive = false
+  local innerNow = SPY.u9.namecallInstance
+  log("ABORT (no hook installed): cannot blank baselines (u9=" .. tostring(okBlankA) .. " tbl=" .. tostring(okBlankB)
+    .. " u9Frozen=" .. tostring(table.isfrozen(SPY.u9))
+    .. " innerFrozen=" .. tostring(type(innerNow) == "table" and table.isfrozen(innerNow)) .. ")")
+  return SPY
+end
+log("baselines blanked + verified (pre-hook).")
+
 -- blinder: keep the namecallInstance baselines EMPTY so every AC scan
 -- re-baselines from its own (correct) stack and never misfires.
 local blindTicks = 0
+local blindFails = 0
 SPY.blindTicks = 0
+SPY.blindFails = 0
 task.spawn(function()
   while SPY.alive do
-    pcall(function()
-      SPY.u9.namecallInstance = {}
-      SPY.tbl1.namecallInstance = nil
-    end)
+    local a, b = blankBaselines()
     blindTicks = blindTicks + 1
     SPY.blindTicks = blindTicks
+    if a and b then
+      blindFails = 0
+    else
+      blindFails = blindFails + 1
+      SPY.blindFails = blindFails
+      if blindFails >= 3 then
+        log("blinder writes failing repeatedly - auto-reverting")
+        if type(SPY.stop) == "function" then SPY.stop() else SPY.alive = false end
+        break
+      end
+    end
     task.wait(0.2)
   end
 end)
@@ -215,12 +262,15 @@ function SPY.drain()
 end
 
 function SPY.status()
+  local inner = SPY.u9 and SPY.u9.namecallInstance
   return {
     alive = SPY.alive,
     blindTicks = blindTicks,
+    blindFails = blindFails,
     queued = #rawQueue,
     hookIntact = (probeGame() == SPY.origFn),
-    hasU9 = SPY.u9 ~= nil and rawget(SPY.u9, "namecallInstance") ~= nil,
+    u9InnerEmpty = type(inner) == "table" and next(inner) == nil,
+    tblBlank = rawget(SPY.tbl1, "namecallInstance") == nil,
   }
 end
 
