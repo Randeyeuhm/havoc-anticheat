@@ -27,10 +27,20 @@
 
 local KILL = {}
 local genv = (type(getgenv) == "function" and getgenv()) or _G
-local STATE = genv.HAVOC_ACKILL_STATE
+local STATE = genv.HAVOC_AC_STATE
 if type(STATE) ~= "table" then
   STATE = { hooked = {}, origs = {} }
-  genv.HAVOC_ACKILL_STATE = STATE
+  -- migrate state from the legacy key (old sessions / older tool builds)
+  local oldState = genv.HAVOC_ACKILL_STATE
+  if type(oldState) == "table" then
+    if type(oldState.hooked) == "table" then
+      for f, v in pairs(oldState.hooked) do STATE.hooked[f] = v end
+    end
+    if type(oldState.origs) == "table" then
+      for _, rec in ipairs(oldState.origs) do STATE.origs[#STATE.origs + 1] = rec end
+    end
+  end
+  genv.HAVOC_AC_STATE = STATE
 end
 do
   local prev = genv.HAVOC_ACKILL
